@@ -3,7 +3,7 @@
 This version from 2026 adds 6-digit locator support to the WsprryPi version by F5OEO.
 The 6-digit locator code was taken from https://github.com/g4wnc/WsprryPi
 
-This results in version with clean RF due to "librpitx" and support for 6-digit locators (Type 3 messages).
+This results in version with clean RF and stability due to the use of "librpitx" and also supports 6-digit locators (Type 3 messages).
 It compiles and runs on my Pi4.
 
 # Raspberry Pi bareback LF/MF/HF/VHF WSPR transmitter
