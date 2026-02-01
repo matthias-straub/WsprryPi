@@ -23,7 +23,7 @@ Installation / update:
   
     sudo apt-get install git
   
-    git clone https://github.com/F5OEO/WsprryPi.git
+    git clone https://github.com/matthias-straub/WsprryPi.git
     
     cd WsprryPi
     
