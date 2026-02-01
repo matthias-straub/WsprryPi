@@ -18,6 +18,7 @@
 // ha7ilm: added RPi2 support based on a patch to PiFmRds by Cristophe
 // Jacquet and Richard Hirst: http://git.io/vn7O9
 // F5OEO : adapt to librpitx for cleaner spectrum
+// DL1HN : included 6-digit locator support (Type 3) from https://github.com/g4wnc/WsprryPi
 
 #include <stdio.h>
 #include <string.h>
@@ -46,6 +47,8 @@
 #include <pthread.h>
 #include <sys/timex.h>
 #include "librpitx/src/librpitx.h"
+
+#include "nhash.c"
 
 clkgpio *clk = NULL;
 ngfmdmasync *ngfmtest = NULL;
@@ -131,75 +134,101 @@ void to_upper(
   }
 }
 
+// update taken from https://github.com/g4wnc/WsprryPi
 // Encode call, locator, and dBm into WSPR codeblock.
-void wspr(
-    const char *call,
-    const char *l_pre,
-    const char *dbm,
-    unsigned char *symbols)
-{
-  // pack prefix in nadd, call in n1, grid, dbm in n2
-  char *c, buf[16];
+// Assumes that both callsign and locator are uppercase. This is done in
+// parse_commandline(), but needs to be ensured if calling this function
+// manually.
+void wspr(const char *call, const char *l_pre,
+          const int dbm, // EIRP in
+          // dBm={0,3,7,10,13,17,20,23,27,30,33,37,40,43,47,50,53,57,60}
+          unsigned char *symbols) {
+  // pack 'prefix' in nadd, 'call' in n1, and 'grid' and 'dbm' in n2
+  char *c, buf[17];
   strncpy(buf, call, 16);
+  buf[16] = '\0';
   c = buf;
-  to_upper(c);
-  unsigned long ng, nadd = 0;
+  unsigned long ng = 0, ih = 0, nadd = 0;
+  unsigned long n1, n2;
 
-  if (strchr(c, '/'))
-  { // prefix-suffix
+  if (strnlen(l_pre, 6) == 6) {
+    // When sending a 6 character grid, the callsign is hashed, then the grid
+    // wrapped around one character and used as the callsign.
+    ih = nhash(c, strnlen(c, 16), 146) & 0x7fff; // 15 bit mask
+
+    c[0] = l_pre[1];
+    c[1] = l_pre[2];
+    c[2] = l_pre[3];
+    c[3] = l_pre[4];
+    c[4] = l_pre[5];
+    c[5] = l_pre[0];
+    c[6] = '\0';
+  }
+
+  if (strchr(c, '/') != nullptr) { // prefix-suffix
     nadd = 2;
     int i = strchr(c, '/') - c; // stroke position
     int n = strlen(c) - i - 1;  // suffix len, prefix-call len
     c[i] = '\0';
-    if (n == 1)
-      ng = 60000 - 32768 + (c[i + 1] >= '0' && c[i + 1] <= '9' ? c[i + 1] - '0' : c[i + 1] == ' ' ? 38
-                                                                                                  : c[i + 1] - 'A' + 10); // suffix /A to /Z, /0 to /9
-    if (n == 2)
-      ng = 60000 + 26 + 10 * (c[i + 1] - '0') + (c[i + 2] - '0'); // suffix /10 to /99
-    if (n > 2)
-    { // prefix EA8/, right align
-      ng = (i < 3 ? 36 : c[i - 3] >= '0' && c[i - 3] <= '9' ? c[i - 3] - '0'
-                                                            : c[i - 3] - 'A' + 10);
-      ng = 37 * ng + (i < 2 ? 36 : c[i - 2] >= '0' && c[i - 2] <= '9' ? c[i - 2] - '0'
-                                                                      : c[i - 2] - 'A' + 10);
-      ng = 37 * ng + (i < 1 ? 36 : c[i - 1] >= '0' && c[i - 1] <= '9' ? c[i - 1] - '0'
-                                                                      : c[i - 1] - 'A' + 10);
-      if (ng < 32768)
+    if (n == 1) {
+      ng = 60000 - 32768 +
+           (c[i + 1] >= '0' && c[i + 1] <= '9'
+                ? c[i + 1] - '0'
+                : c[i + 1] == ' ' ? 38 : c[i + 1] - 'A' +
+                                             10); // suffix /A to /Z, /0 to /9
+    }
+    if (n == 2) {
+      ng = 60000 + 26 + 10 * (c[i + 1] - '0') +
+           (c[i + 2] - '0'); // suffix /10 to /99
+    }
+    if (n > 2) { // prefix EA8/, right align
+      ng = (i < 3 ? 36 : c[i - 3] >= '0' && c[i - 3] <= '9'
+                             ? c[i - 3] - '0'
+                             : c[i - 3] - 'A' + 10);
+      ng = 37 * ng + (i < 2 ? 36 : c[i - 2] >= '0' && c[i - 2] <= '9'
+                                       ? c[i - 2] - '0'
+                                       : c[i - 2] - 'A' + 10);
+      ng = 37 * ng + (i < 1 ? 36 : c[i - 1] >= '0' && c[i - 1] <= '9'
+                                       ? c[i - 1] - '0'
+                                       : c[i - 1] - 'A' + 10);
+      if (ng < 32768) {
         nadd = 1;
-      else
+      } else {
         ng = ng - 32768;
+      }
       c = c + i + 1;
     }
   }
 
-  int i = (isdigit(c[2]) ? 2 : isdigit(c[1]) ? 1
-                                             : 0); // last prefix digit of de-suffixed/de-prefixed callsign
-  int n = strlen(c) - i - 1;                       // 2nd part of call len
-  unsigned long n1;
+  int i =
+      (isdigit(c[2]) != 0
+           ? 2
+           : isdigit(c[1]) != 0
+                 ? 1
+                 : 0); // last prefix digit of de-suffixed/de-prefixed callsign
+  int n = strlen(c) - i - 1; // 2nd part of call len
   n1 = (i < 2 ? 36 : c[i - 2] >= '0' && c[i - 2] <= '9' ? c[i - 2] - '0'
                                                         : c[i - 2] - 'A' + 10);
-  n1 = 36 * n1 + (i < 1 ? 36 : c[i - 1] >= '0' && c[i - 1] <= '9' ? c[i - 1] - '0'
-                                                                  : c[i - 1] - 'A' + 10);
+  n1 = 36 * n1 + (i < 1 ? 36 : c[i - 1] >= '0' && c[i - 1] <= '9'
+                                   ? c[i - 1] - '0'
+                                   : c[i - 1] - 'A' + 10);
   n1 = 10 * n1 + c[i] - '0';
   n1 = 27 * n1 + (n < 1 ? 26 : c[i + 1] - 'A');
   n1 = 27 * n1 + (n < 2 ? 26 : c[i + 2] - 'A');
   n1 = 27 * n1 + (n < 3 ? 26 : c[i + 3] - 'A');
 
-  // if(rand() % 2) nadd=0;
-  if (!nadd)
-  {
-    // Copy locator locally since it is declared const and we cannot modify
-    // its contents in-place.
-    char l[4];
-    strncpy(l, l_pre, 4);
-    to_upper(l); // grid square Maidenhead locator (uppercase)
-    ng = 180 * (179 - 10 * (l[0] - 'A') - (l[2] - '0')) + 10 * (l[1] - 'A') + (l[3] - '0');
+  if ((nadd == 0u) && strnlen(l_pre, 6) == 4) {
+    // Encode the 4 character location
+    ng = 180 * (179 - 10 * (l_pre[0] - 'A') - (l_pre[2] - '0')) +
+         10 * (l_pre[1] - 'A') + (l_pre[3] - '0');
   }
-  int p = atoi(dbm); // EIRP in dBm={0,3,7,10,13,17,20,23,27,30,33,37,40,43,47,50,53,57,60}
   int corr[] = {0, -1, 1, 0, -1, 2, 1, 0, -1, 1};
-  p = p > 60 ? 60 : p < 0 ? 0
-                          : p + corr[p % 10];
-  unsigned long n2 = (ng << 7) | (p + 64 + nadd);
+  int p = dbm > 60 ? 60 : dbm < 0 ? 0 : dbm + corr[dbm % 10];
+  if (strnlen(l_pre, 6) == 4) {
+    n2 = (ng << 7) | (p + 64 + nadd);
+  } else {
+    n2 = (ih << 7) | (-(p + 1) + 64);
+  }
 
   // pack n1,n2,zero-tail into 50 bits
   char packed[11] = {
@@ -220,18 +249,14 @@ void wspr(
   int j, s;
   int nstate = 0;
   unsigned char symbol[176];
-  for (j = 0; j != sizeof(packed); j++)
-  {
-    for (i = 7; i >= 0; i--)
-    {
+  for (j = 0; j != sizeof(packed); j++) {
+    for (i = 7; i >= 0; i--) {
       unsigned long poly[2] = {0xf2d05351L, 0xe4613c47L};
       nstate = (nstate << 1) | ((packed[j] >> i) & 1);
-      for (s = 0; s != 2; s++)
-      { // convolve
+      for (s = 0; s != 2; s++) { // convolve
         unsigned long n = nstate & poly[s];
         int even = 0; // even := parity(n)
-        while (n)
-        {
+        while (n != 0u) {
           even = 1 - even;
           n = n & (n - 1);
         }
@@ -242,26 +267,28 @@ void wspr(
   }
 
   // interleave symbols
-  const unsigned char npr3[162] = {
-      1, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0,
-      0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 0, 1, 1, 0, 1, 0,
-      0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0,
-      0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 0, 1, 1, 1,
-      0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 0, 1, 1, 0, 0, 0, 1, 1, 0,
-      0, 0};
-  for (i = 0; i != 162; i++)
-  {
+  const unsigned char sync_symbols[162] = {
+      1, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1, 0, 1,
+      1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0,
+      1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 0, 1, 1, 0, 1, 0, 0, 0, 0, 1, 1, 0, 1, 0,
+      1, 0, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0,
+      0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 1, 1, 0, 0, 1, 1,
+      0, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1, 1, 0, 0, 0, 0,
+      0, 0, 0, 1, 1, 0, 1, 0, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0};
+  for (i = 0; i != 162; i++) {
     // j0 := bit reversed_values_smaller_than_161[i]
     unsigned char j0;
     p = -1;
-    for (k = 0; p != i; k++)
-    {
-      for (j = 0; j != 8; j++) // j0:=bit_reverse(k)
+    for (k = 0; p != i; k++) {
+      for (j = 0; j != 8; j++) { // j0:=bit_reverse(k)
         j0 = ((k >> j) & 1) | (j0 << 1);
-      if (j0 < 162)
+      }
+      if (j0 < 162) {
         p++;
+      }
     }
-    symbols[j0] = npr3[j0] | symbol[i] << 1; // interleave and add sync std::vector
+    symbols[j0] = sync_symbols[j0] |
+                  symbol[i] << 1; // interleave and add sync std::vector
   }
 }
 
@@ -330,7 +357,7 @@ void parse_commandline(
     // Outputs
     std::string &callsign,
     std::string &locator,
-    std::string &tx_power,
+    int &tx_power,
     std::vector<double> &center_freq_set,
     double &ppm,
     bool &self_cal,
@@ -342,6 +369,7 @@ void parse_commandline(
     int &terminate)
 {
   // Default values
+  tx_power=-1;
   ppm = 0;
   self_cal = true;
   repeat = false;
@@ -457,7 +485,7 @@ void parse_commandline(
     }
     if (n_free_args == 2)
     {
-      tx_power = argv[optind++];
+      tx_power = atoi(argv[optind++]);
       n_free_args++;
       continue;
     }
@@ -567,7 +595,7 @@ void parse_commandline(
   }
   if (mode == TONE)
   {
-    if ((callsign != "") || (locator != "") || (tx_power != "") || (center_freq_set.size() != 0) || random_offset)
+    if ((callsign != "") || (locator != "") || (tx_power != -1) || (center_freq_set.size() != 0) || random_offset)
     {
       std::cerr << "Warning: callsign, locator, etc. are ignored when generating test tone" << std::endl;
     }
@@ -580,7 +608,7 @@ void parse_commandline(
   }
   else
   {
-    if ((callsign == "") || (locator == "") || (tx_power == "") || (center_freq_set.size() == 0))
+    if ((callsign == "") || (locator == "") || (tx_power == -1) || (center_freq_set.size() == 0))
     {
       std::cerr << "Error: must specify callsign, locator, dBm, and at least one frequency" << std::endl;
       std::cerr << "Try: wspr --help" << std::endl;
@@ -745,7 +773,7 @@ int main(const int argc, char *const argv[])
   // Parse arguments
   std::string callsign;
   std::string locator;
-  std::string tx_power;
+  int tx_power;
   std::vector<double> center_freq_set;
   double ppm;
   bool self_cal;
@@ -803,10 +831,15 @@ int main(const int argc, char *const argv[])
   else
   {
     // WSPR mode
-
     // Create WSPR symbols
-    unsigned char symbols[162];
-    wspr(callsign.c_str(), locator.c_str(), tx_power.c_str(), symbols);
+    unsigned char symbols_grid4[162];
+    unsigned char symbols_grid6[162];
+    wspr(callsign.c_str(), locator.substr(0, 4).c_str(), tx_power,
+         symbols_grid4);
+    if (locator.size() == 6) {
+      wspr(callsign.c_str(), locator.c_str(), tx_power, symbols_grid6);
+    }
+
     /*
     printf("WSPR codeblock: ");
     for (int i = 0; i < (signed)(sizeof(symbols)/sizeof(*symbols)); i++) {
@@ -893,6 +926,7 @@ int main(const int argc, char *const argv[])
         int FifoSize = 40000;
         bool usePWMSample = false;
         static float *FreqPWM = NULL;
+	double tone_freq;
 
         //New modulator and tx on
         ngfmtest = new ngfmdmasync(center_freq_actual, SR, 14, FifoSize, true);
@@ -909,7 +943,12 @@ int main(const int argc, char *const argv[])
 
         for (int i = 0; i < 162; i++)
         {
-          double tone_freq = -1.5 * tone_spacing + symbols[i] * tone_spacing - RealFreq;
+          if (locator.size() == 4 || n_tx % 2 == 0) {
+            tone_freq = -1.5 * tone_spacing + symbols_grid4[i] * tone_spacing - RealFreq;
+	  }
+	  else {
+	    tone_freq = -1.5 * tone_spacing + symbols_grid6[i] * tone_spacing - RealFreq;
+	  }
           int Nbtx = 0;
           int f1 = 0;
           int Frac = ngfmtest->GetMasterFrac(0);
