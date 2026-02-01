@@ -20,13 +20,21 @@ This version uses https://github.com/F5OEO/librpitx
 Installation / update:
 ******
   Download and compile code:
+  
     sudo apt-get install git
+  
     git clone https://github.com/F5OEO/WsprryPi.git
+    
     cd WsprryPi
+    
     git clone https://github.com/F5OEO/librpitx.git 
+    
     cd librpitx/src  
+    
     make
+    
     cd ../../
+    
     make 
 
   Install to /usr/local/bin:
